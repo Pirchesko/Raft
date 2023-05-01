@@ -1,0 +1,465 @@
+\* Это формальная спецификация алгоритма консенсуса Raft.
+
+\* Copyright 2014 Diego Ongaro.
+\* Эта работа лицензирована в соответствии с Creative Commons Attribution-4.0
+\* International License https://creativecommons.org/licenses/by/4.0/
+
+EXTENDS Naturals, FiniteSets, Sequences, TLC
+
+\* Множество идентификаторов серверов
+CONSTANTS Server
+
+\* Множество запросов, которые могут пойти в журнал
+CONSTANTS Value
+
+\* Состояния сервера.
+CONSTANTS Follower, Candidate, Leader
+
+\* Зарезервированное значение.
+CONSTANTS Nil
+
+\* Типы сообщений:
+CONSTANTS RequestVoteRequest, RequestVoteResponse,
+          AppendEntriesRequest, AppendEntriesResponse
+
+----
+\* Глобальные переменные
+
+\* Мешок записей, представляющих запросы и ответы, отправленные от одного сервера
+\* к другому. TLAPS не поддерживает модуль Bags, поэтому это функция,
+\* отображающая сообщение в Nat.
+VARIABLE messages
+
+\* Историческая переменная, используемая в доказательстве. Ее не будет в
+\* реализации.
+\* Отслеживает успешные выборы, включая начальные журналы лидера и журналы избирателей.
+\* Множество функций, содержащих различные вещи о успешных выборах (см. BecomeLeader).
+VARIABLE elections
+
+\* Историческая переменная, используемая в доказательстве. Ее не будет в
+\* реализации.
+\* Отслеживает каждый журнал, когда-либо существовавший в системе (множество журналов).
+VARIABLE allLogs
+
+----
+\* Следующие переменные присутствуют для каждого сервера (функции с доменом Server).
+
+\* Номер текущего термина для сервера.
+VARIABLE currentTerm
+\* Состояние сервера (Follower, Candidate или Leader).
+VARIABLE state
+\* Кандидат, за которого сервер проголосовал в его текущем термине,
+\* или Nil, если он не голосовал за кого-либо.
+VARIABLE votedFor
+serverVars == <<currentTerm, state, votedFor>>
+
+\* Последовательность записей журнала. Индекс в этой последовательности - это индекс записи журнала.
+\* К сожалению, модуль Sequence определяет Head(s) как запись с индексом 1,
+\* поэтому будьте осторожны, не используйте это!
+VARIABLE log
+\* Индекс последней записи в журнале, которую может применить конечный автомат.
+VARIABLE commitIndex
+logVars == <<log, commitIndex>>
+
+\* Следующие переменные используются только на кандидатах:
+\* Множество серверов, от которых кандидат получил ответ на RequestVote в его текущем термине.
+VARIABLE votesResponded
+\* Множество серверов, от которых кандидат получил голос в его текущем термине.
+VARIABLE votesGranted
+\* Историческая переменная, используемая в доказательстве. Ее не будет в
+\* реализации.
+\* Функция от каждого сервера, проголосовавшего за этого кандидата в его текущем термине,
+\* на журнал этого выборщика.
+VARIABLE voterLog
+candidateVars == <<votesResponded, votesGranted, voterLog>>
+
+\* Следующие переменные используются только на лидерах:
+\* Следующая запись для отправки каждому последователю.
+VARIABLE nextIndex
+\* Последняя запись, на которую каждый последователь подтвердил, что она такая же, как и у лидера.
+\* Это используется для расчета commitIndex на лидере.
+VARIABLE matchIndex
+leaderVars == <<nextIndex, matchIndex, elections>>
+
+\* Конец переменных для каждого сервера.
+----
+
+\* Все переменные; используется для стагнации (утверждение того, что состояние не изменилось).
+vars == <<messages, allLogs, serverVars, candidateVars, leaderVars, logVars>>
+\* Вспомогательные функции
+
+\* Множество всех кворумов. Эта функция просто рассчитывает простые большинства,
+\* но единственное важное свойство заключается в том, что каждый кворум имеет пересечение с каждым другим.
+Quorum == {i \in SUBSET(Server) : Cardinality(i) * 2 > Cardinality(Server)}
+
+\* Термин последней записи в журнале или 0, если журнал пуст.
+LastTerm(xlog) == IF Len(xlog) = 0 THEN 0 ELSE xlog[Len(xlog)].term
+
+\* Вспомогательная функция для Send и Reply. Данное сообщение m и сумка сообщений,
+\* возвращает новую сумку сообщений с одним сообщением m.
+WithMessage(m, msgs) ==
+    IF m \in DOMAIN msgs THEN
+        [msgs EXCEPT ![m] = msgs[m] + 1]
+    ELSE
+        msgs @@ (m :> 1)
+
+\* Вспомогательная функция для Discard и Reply. Данное сообщение m и сумка сообщений,
+\* возвращает новую сумку сообщений с одним сообщением m.
+WithoutMessage(m, msgs) ==
+    IF m \in DOMAIN msgs THEN
+        [msgs EXCEPT ![m] = msgs[m] - 1]
+    ELSE
+        msgs
+
+\* Добавить сообщение в сумку сообщений.
+Send(m) == messages' = WithMessage(m, messages)
+
+\* Удалить сообщение из сумки сообщений. Используется, когда сервер закончил
+\* обработку сообщения.
+Discard(m) == messages' = WithoutMessage(m, messages)
+
+\* Комбинация Send и Discard
+Reply(response, request) ==
+    messages' = WithoutMessage(request, WithMessage(response, messages))
+
+\* Возвращает минимальное значение из множества или неопределенное, если множество пусто.
+Min(s) == CHOOSE x \in s : \A y \in s : x <= y
+\* Возвращает максимальное значение из множества или неопределенное, если множество пусто.
+Max(s) == CHOOSE x \in s : \A y \in s : x >= y
+
+----
+
+\* Определение начальных значений всех переменных
+
+InitHistoryVars == /\ elections = {}
+                   /\ allLogs   = {}
+                   /\ voterLog  = [i \in Server |-> [j \in {} |-> <<>>]]
+InitServerVars == /\ currentTerm = [i \in Server |-> 1]
+                  /\ state       = [i \in Server |-> Follower]
+                  /\ votedFor    = [i \in Server |-> Nil]
+InitCandidateVars == /\ votesResponded = [i \in Server |-> {}]
+                     /\ votesGranted   = [i \in Server |-> {}]
+\* Значения nextIndex[i][i] и matchIndex[i][i] никогда не считываются, так как
+\* лидер не отправляет самому себе сообщения. Тем не менее, проще включить их
+\* в функции.
+InitLeaderVars == /\ nextIndex  = [i \in Server |-> [j \in Server |-> 1]]
+                  /\ matchIndex = [i \in Server |-> [j \in Server |-> 0]]
+InitLogVars == /\ log          = [i \in Server |-> << >>]
+               /\ commitIndex  = [i \in Server |-> 0]
+Init == /\ messages = [m \in {} |-> 0]
+        /\ InitHistoryVars
+        /\ InitServerVars
+        /\ InitCandidateVars
+        /\ InitLeaderVars
+        /\ InitLogVars
+
+\* Определение переходов состояний
+
+\* Сервер i перезапускается из устойчивого хранилища.
+\* Он теряет все, кроме своего currentTerm, votedFor и log.
+Restart(i) ==
+    /\ state'          = [state EXCEPT ![i] = Follower]
+    /\ votesResponded' = [votesResponded EXCEPT ![i] = {}]
+    /\ votesGranted'   = [votesGranted EXCEPT ![i] = {}]
+    /\ voterLog'       = [voterLog EXCEPT ![i] = [j \in {} |-> <<>>]]
+    /\ nextIndex'      = [nextIndex EXCEPT ![i] = [j \in Server |-> 1]]
+    /\ matchIndex'     = [matchIndex EXCEPT ![i] = [j \in Server |-> 0]]
+    /\ commitIndex'    = [commitIndex EXCEPT ![i] = 0]
+    /\ UNCHANGED <<messages, currentTerm, votedFor, log, elections>>
+
+\* Сервер i таймаутит и начинает новые выборы.
+Timeout(i) == /\ state[i] \in {Follower, Candidate}
+              /\ state' = [state EXCEPT ![i] = Candidate]
+              /\ currentTerm' = [currentTerm EXCEPT ![i] = currentTerm[i] + 1]
+              \* Большинство реализаций, скорее всего, просто установят местное голосование
+              \* атомарно, но для этого спецификации это слабее.
+              /\ votedFor' = [votedFor EXCEPT ![i] = Nil]
+              /\ votesResponded' = [votesResponded EXCEPT ![i] = {}]
+              /\ votesGranted'   = [votesGranted EXCEPT ![i] = {}]
+              /\ voterLog'       = [voterLog EXCEPT ![i] = [j \in {} |-> <<>>]]
+              /\ UNCHANGED <<messages, leaderVars, logVars>>
+
+\* Кандидат i отправляет j запрос на RequestVote.
+RequestVote(i, j) ==
+    /\ state[i] = Candidate
+    /\ j \notin votesResponded[i]
+    /\ Send([mtype         |-> RequestVoteRequest,
+             mterm         |-> currentTerm[i],
+             mlastLogTerm  |-> LastTerm(log[i]),
+             mlastLogIndex |-> Len(log[i]),
+             msource       |-> i,
+             mdest         |-> j])
+    /\ UNCHANGED <<serverVars, candidateVars, leaderVars, logVars>>
+
+\* Лидер i отправляет j запрос AppendEntries, содержащий до 1 записи.
+\* Хотя реализации могут хотеть отправить более 1 записи за раз, эта спецификация использует
+\* только 1, так как это минимизирует атомарности без потери общности.
+AppendEntries(i, j) ==
+    /\ i /= j
+    /\ state[i] = Leader
+    /\ LET prevLogIndex == nextIndex[i][j] - 1
+           prevLogTerm == IF prevLogIndex > 0 THEN
+                              log[i][prevLogIndex].term
+                          ELSE
+                              0
+           \* Отправить до 1 записи, ограниченной концом журнала
+           lastEntry == Min({Len(log[i]), nextIndex[i][j]})
+           entries == SubSeq(log[i], nextIndex[i][j], lastEntry)
+       IN Send([mtype          |-> AppendEntriesRequest,
+                mterm          |-> currentTerm[i],
+                mprevLogIndex  |-> prevLogIndex,
+                mprevLogTerm   |-> prevLogTerm,
+                mentries       |-> entries,
+                \* mlog используется в качестве переменной истории для доказательства.
+                \* В реальной реализации ее не будет.
+                mlog           |-> log[i],
+                mcommitIndex   |-> Min({commitIndex[i], lastEntry}),
+                msource        |-> i,
+                mdest          |-> j])
+    /\ UNCHANGED <<serverVars, candidateVars, leaderVars, logVars>>
+
+\* Кандидат i становится лидером.
+BecomeLeader(i) ==
+    /\ state[i] = Candidate
+    /\ votesGranted[i] \in Quorum
+    /\ state'      = [state EXCEPT ![i] = Leader]
+    /\ nextIndex'  = [nextIndex EXCEPT ![i] =
+                         [j \in Server |-> Len(log[i]) + 1]]
+    /\ matchIndex' = [matchIndex EXCEPT ![i] =
+                         [j \in Server |-> 0]]
+    /\ elections'  = elections \cup
+                         {[eterm     |-> currentTerm[i],
+                           eleader   |-> i,
+                           elog      |-> log[i],
+                           evotes    |-> votesGranted[i],
+                           evoterLog |-> voterLog[i]]}
+    /\ UNCHANGED <<messages, currentTerm, votedFor, candidateVars, logVars>>
+\* Лидер i получает запрос от клиента на добавление v в журнал.
+ClientRequest(i, v) ==
+    /\ state[i] = Leader
+    /\ LET entry == [term  |-> currentTerm[i],
+                     value |-> v]
+           newLog == Append(log[i], entry)
+       IN  log' = [log EXCEPT ![i] = newLog]
+    /\ UNCHANGED <<messages, serverVars, candidateVars,
+                   leaderVars, commitIndex>>
+
+\* Лидер i увеличивает свой commitIndex.
+\* Это делается отдельно от обработки ответов AppendEntries,
+\* частично для минимизации областей атомарности и частично для того,
+\* чтобы лидеры односерверных кластеров могли отмечать фиксированные записи.
+AdvanceCommitIndex(i) ==
+    /\ state[i] = Leader
+    /\ LET \* Множество серверов, согласных с индексом.
+           Agree(index) == {i} \cup {k \in Server :
+                                         matchIndex[i][k] >= index}
+           \* Максимальный индекс, для которого кворум согласен
+           agreeIndexes == {index \in 1..Len(log[i]) :
+                                Agree(index) \in Quorum}
+           \* Новое значение для commitIndex'[i]
+           newCommitIndex ==
+              IF /\ agreeIndexes /= {}
+                 /\ log[i][Max(agreeIndexes)].term = currentTerm[i]
+              THEN
+                  Max(agreeIndexes)
+              ELSE
+                  commitIndex[i]
+       IN commitIndex' = [commitIndex EXCEPT ![i] = newCommitIndex]
+    /\ UNCHANGED <<messages, serverVars, candidateVars, leaderVars, log>>
+
+----
+\* Обработчики сообщений
+\* i = получатель, j = отправитель, m = сообщение
+
+\* Сервер i получает запрос на голосование от сервера j с
+\* m.mterm <= currentTerm[i].
+HandleRequestVoteRequest(i, j, m) ==
+    LET logOk == \/ m.mlastLogTerm > LastTerm(log[i])
+                 \/ /\ m.mlastLogTerm = LastTerm(log[i])
+                    /\ m.mlastLogIndex >= Len(log[i])
+        grant == /\ m.mterm = currentTerm[i]
+                 /\ logOk
+                 /\ votedFor[i] \in {Nil, j}
+    IN /\ m.mterm <= currentTerm[i]
+       /\ \/ grant  /\ votedFor' = [votedFor EXCEPT ![i] = j]
+          \/ ~grant /\ UNCHANGED votedFor
+       /\ Reply([mtype        |-> RequestVoteResponse,
+                 mterm        |-> currentTerm[i],
+                 mvoteGranted |-> grant,
+                 \* mlog используется только для переменной истории `elections' 
+                 \* в доказательстве. В реальной реализации этого не будет.
+                 mlog         |-> log[i],
+                 msource      |-> i,
+                 mdest        |-> j],
+                 m)
+       /\ UNCHANGED <<state, currentTerm, candidateVars, leaderVars, logVars>>
+
+\* Сервер i получает ответ на запрос на голосование от сервера j с
+\* m.mterm = currentTerm[i].
+HandleRequestVoteResponse(i, j, m) ==
+    \* Это подсчитывает голоса даже тогда, когда текущее состояние не Candidate,
+    \* но они не будут учтены, поэтому не имеет значения.
+    /\ m.mterm = currentTerm[i]
+    /\ votesResponded' = [votesResponded EXCEPT ![i] =
+                              votesResponded[i] \cup {j}]
+    /\ \/ /\ m.mvoteGranted
+          /\ votesGranted' = [votesGranted EXCEPT ![i] =
+                                  votesGranted[i] \cup {j}]
+          /\ voterLog' = [voterLog EXCEPT ![i] =
+                              voterLog[i] @@ (j :> m.mlog)]
+       \/ /\ ~m.mvoteGranted
+          /\ UNCHANGED <<votesGranted, voterLog>>
+    /\ Discard(m)
+    /\ UNCHANGED <<serverVars, votedFor, leaderVars, logVars>>
+\* Сервер i получает запрос AppendEntries от сервера j с
+\* m.mterm <= currentTerm[i]. Это обрабатывает только записи длиной 0 или 1, но
+\* реализации могут безопасно принимать больше запросов, обрабатывая их так же, как
+\* множества независимых запросов на 1 запись.
+HandleAppendEntriesRequest(i, j, m) ==
+    LET logOk == \/ m.mprevLogIndex = 0
+                 \/ /\ m.mprevLogIndex > 0
+                    /\ m.mprevLogIndex <= Len(log[i])
+                    /\ m.mprevLogTerm = log[i][m.mprevLogIndex].term
+    IN /\ m.mterm <= currentTerm[i]
+       /\ \/ /\ \* отклоняем запрос
+                \/ m.mterm < currentTerm[i]
+                \/ /\ m.mterm = currentTerm[i]
+                   /\ state[i] = Follower
+                   /\ \lnot logOk
+             /\ Reply([mtype           |-> AppendEntriesResponse,
+                       mterm           |-> currentTerm[i],
+                       msuccess        |-> FALSE,
+                       mmatchIndex     |-> 0,
+                       msource         |-> i,
+                       mdest           |-> j],
+                       m)
+             /\ UNCHANGED <<serverVars, logVars>>
+          \/ \* переходим в статус Follower
+             /\ m.mterm = currentTerm[i]
+             /\ state[i] = Candidate
+             /\ state' = [state EXCEPT ![i] = Follower]
+             /\ UNCHANGED <<currentTerm, votedFor, logVars, messages>>
+          \/ \* принимаем запрос
+             /\ m.mterm = currentTerm[i]
+             /\ state[i] = Follower
+             /\ logOk
+             /\ LET index == m.mprevLogIndex + 1
+                IN \/ \* запрос уже выполнен
+                       /\ \/ m.mentries = << >>
+                          \/ /\ Len(log[i]) >= index
+                             /\ log[i][index].term = m.mentries[1].term
+                          \* Это может сделать наш commitIndex меньше (если мы обрабатываем старый, дублированный запрос),
+                          \* но это на самом деле никак не влияет на ничего.
+                       /\ commitIndex' = [commitIndex EXCEPT ![i] =
+                                              m.mcommitIndex]
+                       /\ Reply([mtype           |-> AppendEntriesResponse,
+                                 mterm           |-> currentTerm[i],
+                                 msuccess        |-> TRUE,
+                                 mmatchIndex     |-> m.mprevLogIndex +
+                                                     Len(m.mentries),
+                                 msource         |-> i,
+                                 mdest           |-> j],
+                                 m)
+                       /\ UNCHANGED <<serverVars, logVars>>
+                   \/ \* конфликт: удаляем 1 запись
+                       /\ m.mentries /= << >>
+                       /\ Len(log[i]) >= index
+                       /\ log[i][index].term /= m.mentries[1].term
+                       /\ LET new == [index2 \in 1..(Len(log[i]) - 1) |->
+                                          log[i][index2]]
+                          IN log' = [log EXCEPT ![i] = new]
+                       /\ UNCHANGED <<serverVars, commitIndex, messages>>
+                   \/ \* нет конфликта: добавляем запись
+                       /\ m.mentries /= << >>
+                       /\ Len(log[i]) = m.mprevLogIndex
+                       /\ log' = [log EXCEPT ![i] =
+                                      Append(log[i], m.mentries[1])]
+                       /\ UNCHANGED <<serverVars, commitIndex, messages>>
+       /\ UNCHANGED <<candidateVars, leaderVars>>
+\* Сервер i получает ответ AppendEntries от сервера j с m.mterm = currentTerm[i].
+HandleAppendEntriesResponse(i, j, m) ==
+    /\ m.mterm = currentTerm[i]
+    /\ \/ /\ m.msuccess \* успешно
+          /\ nextIndex' = [nextIndex EXCEPT ![i][j] = m.mmatchIndex + 1]
+          /\ matchIndex' = [matchIndex EXCEPT ![i][j] = m.mmatchIndex]
+       \/ /\ \lnot m.msuccess \* неуспешно
+          /\ nextIndex' = [nextIndex EXCEPT ![i][j] =
+                               Max({nextIndex[i][j] - 1, 1})]
+          /\ UNCHANGED <<matchIndex>>
+    /\ Discard(m)
+    /\ UNCHANGED <<serverVars, candidateVars, logVars, elections>>
+
+\* Любой RPC с новым сроком заставляет получателя сначала продвинуть свой срок.
+UpdateTerm(i, j, m) ==
+    /\ m.mterm > currentTerm[i]
+    /\ currentTerm' = [currentTerm EXCEPT ![i] = m.mterm]
+    /\ state' = [state EXCEPT ![i] = Follower]
+    /\ votedFor' = [votedFor EXCEPT ![i] = Nil]
+       \* сообщения не изменены, поэтому m может быть дальше обработана.
+    /\ UNCHANGED <<messages, candidateVars, leaderVars, logVars>>
+
+\* Отклоняются ответы со старыми сроками.
+DropStaleResponse(i, j, m) ==
+    /\ m.mterm < currentTerm[i]
+    /\ Discard(m)
+    /\ UNCHANGED <<serverVars, candidateVars, leaderVars, logVars>>
+
+\* Получить сообщение.
+Receive(m) ==
+    LET i == m.mdest
+        j == m.msource
+    IN \/ UpdateTerm(i, j, m)
+       \/ /\ m.mtype = RequestVoteRequest
+          /\ HandleRequestVoteRequest(i, j, m)
+       \/ /\ m.mtype = RequestVoteResponse
+          /\ \/ DropStaleResponse(i, j, m)
+             \/ HandleRequestVoteResponse(i, j, m)
+       \/ /\ m.mtype = AppendEntriesRequest
+          /\ HandleAppendEntriesRequest(i, j, m)
+       \/ /\ m.mtype = AppendEntriesResponse
+          /\ \/ DropStaleResponse(i, j, m)
+             \/ HandleAppendEntriesResponse(i, j, m)
+
+\* Завершение обработчиков сообщений.
+----
+\* Переходы состояний сети.
+
+\* Сеть дублирует сообщение
+DuplicateMessage(m) ==
+    /\ Send(m)
+    /\ UNCHANGED <<serverVars, candidateVars, leaderVars, logVars>>
+
+\* Сеть отбрасывает сообщение
+DropMessage(m) ==
+    /\ Discard(m)
+    /\ UNCHANGED <<serverVars, candidateVars, leaderVars, logVars>>
+
+----
+\* Определяет, как могут изменяться переменные.
+Next == \/ \E i \in Server : Restart(i)
+        \/ \E i \in Server : Timeout(i)
+        \/ \E i,j \in Server : RequestVote(i, j)
+        \/ \E i \in Server : BecomeLeader(i)
+        \/ \E i \in Server, v \in Value : ClientRequest(i, v)
+        \/ \E i \in Server : AdvanceCommitIndex(i)
+        \/ \E i,j \in Server : AppendEntries(i, j)
+        \/ \E m \in DOMAIN messages : Receive(m)
+        \/ \E m \in DOMAIN messages : DuplicateMessage(m)
+        \/ \E m \in DOMAIN messages : DropMessage(m)
+        \* Переменная истории, отслеживающая каждый журнал:
+     /\ allLogs' = allLogs \cup {log[i] : i \in Server}
+
+\* Спецификация должна начинаться с начального состояния и переходить в соответствии
+\* с Next.
+Spec == Init /\ [][Next]_vars
+
+===============================================================================
+
+\* Журнал изменений:
+\*
+\* 02.12.2014:
+\* - Исправлено AppendEntries, чтобы отправлять только одну запись за раз, как это и задумывалось. Поскольку SubSeq включает в себя, верхняя граница диапазона должна была быть nextIndex, а не nextIndex + 1. Спасибо Игорю Коваленко за сообщение об этой проблеме.
+\* - В AdvanceCommitIndex изменения matchIndex были изменены на matchIndex (без апострофа). Апостроф не был намеренным и, возможно, запутанным, хотя это не имеет практического значения (matchIndex' равен matchIndex). Спасибо Югу Эврарду за сообщение об этой проблеме.
+\*
+\* 07.06.2014:
+\* - Версия из диссертации.

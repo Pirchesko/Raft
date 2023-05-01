@@ -1,0 +1,85 @@
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003" ToolsVersion="4.0">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <SchemaVersion>2.0</SchemaVersion>
+    <ProjectGuid>50c494e1-e4c7-46d1-8152-7764ae1f02ae</ProjectGuid>
+    <ProjectHome>.</ProjectHome>
+    <StartupFile>./src/raft/debug.py</StartupFile>
+    <SearchPath>
+    </SearchPath>
+    <WorkingDirectory>.</WorkingDirectory>
+    <OutputPath>.</OutputPath>
+    <Name>PyRaft</Name>
+    <RootNamespace>PyRaft</RootNamespace>
+    <IsWindowsApplication>False</IsWindowsApplication>
+    <LaunchProvider>Standard Python launcher</LaunchProvider>
+    <CommandLineArguments>start --server 0 --server 1</CommandLineArguments>
+    <EnableNativeCodeDebugging>False</EnableNativeCodeDebugging>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+    <DebugSymbols>true</DebugSymbols>
+    <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <DebugSymbols>true</DebugSymbols>
+    <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="clnt.py" />
+    <Compile Include="setup.py" />
+    <Compile Include="src\raft\cli.py" />
+    <Compile Include="src\raft\client.py" />
+    <Compile Include="src\raft\config.py" />
+    <Compile Include="src\raft\controller.py" />
+    <Compile Include="src\raft\debug.py" />
+    <Compile Include="src\raft\log.py" />
+    <Compile Include="src\raft\messaging.py" />
+    <Compile Include="src\raft\network.py" />
+    <Compile Include="src\raft\server.py" />
+    <Compile Include="src\raft\state_machine.py" />
+    <Compile Include="src\raft\watch.py" />
+    <Compile Include="src\raft\__init__.py" />
+    <Compile Include="tests\conftest.py" />
+    <Compile Include="tests\test_handle_append_entries.py" />
+    <Compile Include="tests\test_handle_append_entries_failed.py" />
+    <Compile Include="tests\test_handle_append_entries_succeeded.py" />
+    <Compile Include="tests\test_handle_messages.py" />
+    <Compile Include="tests\test_handle_request_vote.py" />
+    <Compile Include="tests\test_handle_vote_granted.py" />
+    <Compile Include="tests\test_log.py" />
+    <Compile Include="tests\test_messaging.py" />
+    <Compile Include="tests\test_replicate_log.py" />
+    <Compile Include="tests\test_send_append_entries.py" />
+    <Compile Include="tests\test_server.py" />
+    <Compile Include="tests\test_state_transition_callbacks.py" />
+    <Compile Include="tests\__init__.py" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="docs\" />
+    <Folder Include="src\" />
+    <Folder Include="src\raft.egg-info\" />
+    <Folder Include="src\raft\" />
+    <Folder Include="tests\" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="docs\notes.md" />
+    <Content Include="docs\raft-paper.pdf" />
+    <Content Include="docs\raft.tla.txt" />
+    <Content Include="docs\raft_rus.tla.txt" />
+    <Content Include="src\raft.egg-info\dependency_links.txt" />
+    <Content Include="src\raft.egg-info\entry_points.txt" />
+    <Content Include="src\raft.egg-info\PKG-INFO" />
+    <Content Include="src\raft.egg-info\requires.txt" />
+    <Content Include="src\raft.egg-info\SOURCES.txt" />
+    <Content Include="src\raft.egg-info\top_level.txt" />
+  </ItemGroup>
+  <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
+  <!-- Uncomment the CoreCompile target to enable the Build command in
+       Visual Studio and specify your pre- and post-build commands in
+       the BeforeBuild and AfterBuild targets below. -->
+  <!--<Target Name="CoreCompile" />-->
+  <Target Name="BeforeBuild">
+  </Target>
+  <Target Name="AfterBuild">
+  </Target>
+</Project>
