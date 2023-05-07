@@ -37,6 +37,7 @@
     <Compile Include="src\raft\network.py" />
     <Compile Include="src\raft\server.py" />
     <Compile Include="src\raft\state_machine.py" />
+    <Compile Include="src\raft\test.py" />
     <Compile Include="src\raft\watch.py" />
     <Compile Include="src\raft\__init__.py" />
     <Compile Include="tests\conftest.py" />

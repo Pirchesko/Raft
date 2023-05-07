@@ -91,13 +91,13 @@ input()
 ##############################################################################
 
 str1 = '''
+sudo su andrey
 cd /mnt/d/Files/Visual\ Studio/Other/Distributed\ system/PyRaft/src/raft
-python3 watch.py 3
-
+python3 watch.py 1
 '''
 
 str2 = '''
+sudo su andrey
 cd /mnt/d/Files/Visual\ Studio/Other/Distributed\ system/PyRaft/src/raft
-python3 cli.py --server 0 start
-
+python3 cli.py start --server 0
 '''

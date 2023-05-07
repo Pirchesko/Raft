@@ -20,9 +20,9 @@ from raft.messaging import (
 class NoConnectionError(Exception):
     pass
 
-
 class DistDict:
-    def __init__(self, server_config, timeout=config.CLIENT_TIMEOUT):
+    def __init__(self, server_config, mutex, timeout=config.CLIENT_TIMEOUT):
+        self.mutex = mutex
         self.server_config = server_config
         self.client_id = uuid.uuid1()
         self.timeout = timeout
@@ -67,6 +67,10 @@ class DistDict:
         raise NoConnectionError("couldn't connect to any machine in the cluster")
 
     def send(self, content):
+        self.mutex.acquire()
+        if client != "": print(client + " lock mutex; sleep(3 sec)")
+        time.sleep(3)
+        if client != "": print(client + " sleep() finish")
         try:
             message = Message(
                 sender=self.client_id,
@@ -84,8 +88,12 @@ class DistDict:
         except (AttributeError, ConnectionRefusedError, ClientDisconnected, timeout):
             print(f"was either connected to a server that wasn't the leader, or got a timeout")
             self._cached_sock, self._leader_no = self._find_leader()
+            if client != "": print(client + " unlock mutex")
+            self.mutex.release()
             return self.send(content)
         else:
+            if client != "": print(client + " unlock mutex")
+            self.mutex.release()
             return resp.content.content
 
     def __setitem__(self, key, value):
@@ -99,7 +107,76 @@ class DistDict:
     def __delitem__(self, key):
         return self.send(Command(DelValue(request_id=self._request_id(), key=key)))
 
-client = DistDict(config.SERVERS)
-print("go")
-client['test_2'] = 'hard1'
-print("finish")
+import threading
+import time
+shared_mutex = threading.Lock()
+import asyncio
+import random
+client = ""
+async def task_client1(client1):
+    global client
+    print("client1: started")
+    
+    sleep_rand = random.random()
+    print("client1: sleep " + str(sleep_rand))
+    await asyncio.sleep(sleep_rand)
+    client = "client1"
+    client1['test_1'] = 'value_1'
+    print("client1: client1['test_1'] = 'value_1'")
+
+    sleep_rand = random.random()
+    print("client1: sleep " + str(sleep_rand))
+    await asyncio.sleep(sleep_rand)
+    client = "client1"
+    client1['test_2'] = 'value_2'
+    print("client1: client1['test_2'] = 'value_2'")
+
+    sleep_rand = random.random()
+    print("client1: sleep " + str(sleep_rand))
+    await asyncio.sleep(sleep_rand)
+    client = "client1"
+    client1['test_2'] = client1['test_1']
+    print("client1: client1['test_2'] = client1['test_1']")
+
+    sleep_rand = random.random()
+    print("client1: sleep " + str(sleep_rand))
+    await asyncio.sleep(sleep_rand)
+    print("client1: finish")
+
+async def task_clinet2(client2):
+    global client
+    print("client2: started")
+
+    sleep_rand = random.random()
+    print("client2: sleep " + str(sleep_rand))
+    await asyncio.sleep(sleep_rand)
+    client = "client2"
+    client2['test_1'] = 'value_1_1'
+    print("client2: client2['test_1'] = 'value_1_1'")
+
+    sleep_rand = random.random()
+    print("client2: sleep " + str(sleep_rand))
+    await asyncio.sleep(sleep_rand)
+    client = "client2"
+    client2['test_2_2'] = 'value_2'
+    print("client2: client2['test_2_2'] = 'value_2'")
+
+    sleep_rand = random.random()
+    print("client2: sleep " + str(sleep_rand))
+    await asyncio.sleep(sleep_rand)
+    print("client2: finish")
+
+
+async def main():
+    client1 = DistDict(config.SERVERS, shared_mutex)
+    client2 = DistDict(config.SERVERS, shared_mutex)
+    task1_coroutine = task_client1(client1)
+    task2_coroutine = task_clinet2(client2)
+
+    await asyncio.gather(task1_coroutine, task2_coroutine)
+    client = "cl"
+    print("client1['test_2']")
+    print(client1['test_2'])
+
+asyncio.run(main())
+
